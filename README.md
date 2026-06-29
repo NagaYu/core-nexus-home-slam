@@ -1,80 +1,80 @@
-# Core Nexus Home SLAM — 軽量SLAM 学習用シミュレーション
+# Core Nexus Home SLAM — Lightweight SLAM Educational Simulation
 
-家庭内を移動する小型ロボットを題材に、**自己位置推定（SLAM）・意味論的コストマップ・A\* 経路探索・動的リプランニング**の一連の流れを、外部フレームワーク（ROS / numpy 等）を一切使わず **Python 標準ライブラリのみ** で実装した教育用デモです。ターミナル上にアスキーアートで走行軌跡をリアルタイム描画します。
+An educational demo built around a small robot moving through a home, illustrating the full pipeline of **self-localization (SLAM), semantic costmaps, A\* path planning, and dynamic re-planning** — implemented in **pure Python (standard library only)**, with no external frameworks (ROS, numpy, etc.). The robot's trajectory is rendered as ASCII art in the terminal in real time.
 
 ---
 
-> ### ⚠️ これは学習用シミュレーションです（最初にお読みください）
+> ### ⚠️ This is an educational simulation (please read first)
 >
-> - **製品・研究成果ではありません。** 特定の企業・製品とは無関係です。
-> - 厳密には *既知の壁マップに対する自己位置推定（localization）* です。地図を未知から構築する完全な SLAM（マッピング／ループ閉じ込み）ではありません。
-> - 障害物の知覚レイヤはシミュレータの真の地図を参照する簡略化を含みます（実機の生センサ処理ではありません）。
-> - README やログ中の数値（誤差・処理時間・CPU 占有率）は **すべてこのシミュレータ内・特定マシン上の参考値** であり、実機・実環境での実証値ではありません。
-> - 「軽量／組込み前提」は設計方針を表す言葉で、実機での性能保証ではありません。
+> - **It is not a product or a research result.** It is unaffiliated with any specific company or product.
+> - Strictly speaking this is *localization against a known wall map*. It is not full SLAM (it does not build a map from scratch or perform loop closure).
+> - The perception layer is simplified and reads the simulator's ground-truth map (it is not real raw-sensor processing).
+> - All figures in this README and in the logs (error, processing time, CPU usage) are **reference values measured inside this simulator on one specific machine**, not validated numbers from real hardware or real environments.
+> - "Lightweight / embedded-oriented" describes the design intent; it is not a performance guarantee on real hardware.
 
 ---
 
-## できること
+## Features
 
-- **20×20 グリッドの仮想室内**（外壁・L字仕切り・椅子/テーブル・ペットの皿/おもちゃ）
-- **簡易 LiDAR**（72 ビーム / 5°刻みのレイキャスト点群、センサ雑音付き）
-- **軽量 SLAM**：オドメトリに滑り・回転誤差を注入し、既知壁マップへのレイキャスト残差を最小化する相関型スキャンマッチング（粗→密の 2 段探索）で自己位置を補正
-- **意味論的グリッド**：障害物の面積・形状から「人間用家具」「ペット用品（危険物）」をベイズ更新で確率分類
-- **意図反映コストマップ + A\***：ペットの皿の周囲 50cm を進入禁止、椅子周辺を高コスト化して経路を生成
-- **動的リプランニング**：走行中に椅子が突然進路を塞いだら経路を即時再計算
+- **20×20 grid virtual room** (outer walls, an L-shaped partition, chairs/tables, pet bowls/toys)
+- **Simple LiDAR** (72-beam / 5° raycast point cloud with sensor noise)
+- **Lightweight SLAM**: injects slip and rotation error into odometry, then corrects the pose with correlative scan matching that minimizes raycast residuals against the known wall map (coarse-to-fine two-stage search)
+- **Semantic grid**: classifies obstacles as "human furniture" vs. "pet items (hazard)" from area/shape, with Bayesian updates
+- **Intent-aware costmap + A\***: makes a 50 cm radius around pet bowls non-traversable and raises cost around chairs to generate the route
+- **Dynamic re-planning**: instantly recomputes the route when a chair suddenly blocks the path mid-run
 
-## 実行方法
+## Usage
 
 ```bash
 python3 main.py
 ```
 
-- 依存ライブラリなし（Python 3.8+ / 標準ライブラリのみ）
-- **対話端末**：画面クリアによる実時間アニメーション
-- **パイプ出力時**：数ステップごとのスナップショットを出力
+- No dependencies (Python 3.8+ / standard library only)
+- **Interactive terminal**: real-time animation via screen clearing
+- **When piped**: prints a snapshot every few steps
 
 ```bash
-python3 main.py | less    # スナップショットをまとめて確認
+python3 main.py | less    # review the snapshots together
 ```
 
-## 出力例
+## Example output
 
 ```
-  █ · S · · · · · · · · · · · · · · · · █     S 出発  G 目的地
-  █ · o · H H · · × · · · · · · · · · · █     o 走行軌跡  ◎ ロボット
-  █ · o o · · × × P × × · · · · · · · · █     H 椅子/机   P ペット皿
-  █ · · · o o o · × · · · · · · · · · · █     × 進入禁止域(50cm膨張)
-  █ · · · · · · o o o o o o o · · · · · █     █ 壁
+  █ · S · · · · · · · · · · · · · · · · █     S start   G goal
+  █ · o · H H · · × · · · · · · · · · · █     o trail    ◎ robot
+  █ · o o · · × × P × × · · · · · · · · █     H chair/table   P pet bowl
+  █ · · · o o o · × · · · · · · · · · · █     × keep-out zone (50cm inflation)
+  █ · · · · · · o o o o o o o · · · · · █     █ wall
   ...
->>> [動的イベント] 椅子が突然 (5,11) に移動し進路を封鎖!
->>> [動的リプランニング] step=7: 再計算 0.18 ms → 成功, 新経路長=18
-★ ゴール到達!
+>>> [Dynamic event] A chair suddenly moved to (5,11) and blocked the path!
+>>> [Dynamic re-planning] step=7: recomputed in 0.18 ms -> success, new path length=18
+★ Goal reached!
 ```
 
-## ファイル構成
+## File structure
 
-| ファイル | 役割 |
+| File | Role |
 |---|---|
-| `room_simulator.py` | 仮想室内環境・簡易 LiDAR・オドメトリ誤差注入（地上真実） |
-| `slam_core.py`      | 尤度場 + レイキャスト残差最小化スキャンマッチングによる自己位置推定 |
-| `semantic_grid.py`  | 連結成分クラスタリング + ベイズ更新による家具/危険物の確率分類 |
-| `path_planner.py`   | 意味論コストマップ生成・A\* 経路探索・動的リプランニング |
-| `main.py`           | 全モジュール統合・アスキーアート描画・走行サマリ |
+| `room_simulator.py` | Virtual room, simple LiDAR, odometry error injection (ground truth) |
+| `slam_core.py`      | Self-localization via likelihood field + raycast-residual scan matching |
+| `semantic_grid.py`  | Furniture/hazard probabilistic classification via connected-component clustering + Bayesian updates |
+| `path_planner.py`   | Semantic costmap generation, A\* path planning, dynamic re-planning |
+| `main.py`           | Integration of all modules, ASCII-art rendering, run summary |
 
-## アルゴリズムの要点
+## Algorithm notes
 
-- **スキャンマッチング**：候補姿勢から既知壁マップへレイキャストした「期待距離」と LiDAR 実測距離の残差を、方位ごとに対応づけて最小化。家具など地図に無い障害物に当たったビームは残差から除外。方位対応のため「隅への吸着」バイアスが起きにくい。
-- **尤度場**：壁セルからの距離変換を BFS（整数演算のみ）で前計算。
-- **意味論コストマップ**：ペット皿セル + 半径 2 セル（≈50cm）を進入不可、椅子/テーブル周辺を高コスト化。
-- **A\***：8 近傍・斜め角抜け禁止・オクタイル距離ヒューリスティック。
+- **Scan matching**: minimizes, per bearing, the residual between the LiDAR measured range and the "expected range" obtained by raycasting from a candidate pose against the known wall map. Beams that hit obstacles absent from the map (e.g., furniture) are excluded from the residual. Because it matches per bearing, the "corner-snapping" bias is largely avoided.
+- **Likelihood field**: distance transform from wall cells, precomputed with BFS (integer arithmetic only).
+- **Semantic costmap**: pet-bowl cells plus a 2-cell radius (≈50 cm) are made non-traversable; areas around chairs/tables are given higher cost.
+- **A\***: 8-connected, no diagonal corner-cutting, octile-distance heuristic.
 
-## 既知の制限（教材ゆえの割り切り）
+## Known limitations (deliberate simplifications for teaching)
 
-- 壁マップは既知前提（未知環境のマッピング・ループ閉じ込みは未実装）
-- グリッドは 20×20 固定、連続空間ではなくセル単位
-- スキャンマッチングは局所探索（総当たり）で、大域的な位置喪失（kidnapped robot）からの復帰は非対応
-- セマンティクス分類は面積ヒューリスティック中心の簡易モデル
+- Assumes a known wall map (mapping of unknown environments and loop closure are not implemented)
+- Fixed 20×20 grid; cell-based rather than continuous space
+- Scan matching is local (brute-force) search and does not recover from global localization loss (kidnapped robot)
+- Semantic classification is a simple model based mainly on area heuristics
 
-## ライセンス
+## License
 
-MIT License（`LICENSE` 参照）
+MIT License (see `LICENSE`)
