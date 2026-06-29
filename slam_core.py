@@ -1,21 +1,23 @@
 """
 slam_core.py
 ============
-軽量SLAM(自己位置推定)コア。
+Lightweight SLAM (self-localization) core.
 
-アルゴリズム:
-  1. 予測 (Prediction)
-     ロボットが知るのは『指令オドメトリ』のみ。これを推定姿勢に積分する。
-     真の運動には滑り誤差が乗っているため、放置するとドリフトが蓄積する。
+Algorithm:
+  1. Prediction
+     All the robot knows is the 'commanded odometry'. We integrate it into the
+     estimated pose. Because the true motion carries slip error, drift
+     accumulates if left uncorrected.
 
-  2. 補正 (Correlative Scan Matching on a Likelihood Field)
-     既知の壁形状から『尤度場(各セルから最寄りの壁までの距離マップ)』を
-     前計算しておく。LiDAR点群を候補姿勢で世界座標に変換し、点が壁に
-     どれだけ一致するかをスコア化。(dx, dy, dtheta) を局所探索して
-     スコア最大の補正量を採用する。
+  2. Correction (Correlative Scan Matching on a Likelihood Field)
+     From the known wall shape we precompute a 'likelihood field' (a map of the
+     distance from each cell to the nearest wall). We transform the LiDAR point
+     cloud into world coordinates for a candidate pose and score how well the
+     points match the walls. We do a local search over (dx, dy, dtheta) and take
+     the correction with the highest score.
 
-  これは ICP / 相関型スキャンマッチングの軽量近似であり、
-  行列演算ライブラリ不要・整数グリッド走査のみで CPU 負荷を小さく抑えられる。
+  This is a lightweight approximation of ICP / correlative scan matching. It
+  needs no matrix library and only scans an integer grid, so CPU load stays low.
 """
 
 import math
@@ -27,20 +29,22 @@ from room_simulator import WALL, FREE
 class SlamCore:
     def __init__(self, known_grid, init_pose):
         """
-        known_grid : 既知の壁マップ (外壁・固定壁のみを WALL とした 2D リスト)。
-                     家具など可動物は含めない = 事前地図。
-        init_pose  : 初期推定姿勢 (x, y, theta)。起動時は既知とする。
+        known_grid : the known wall map (a 2D list with only outer/fixed walls
+                     marked WALL). Movable objects such as furniture are not
+                     included = the prior map.
+        init_pose  : initial estimated pose (x, y, theta). Assumed known at
+                     start-up.
         """
         self.size = len(known_grid)
         self.known_grid = known_grid
         self.est_pose = tuple(init_pose)
         self.likelihood = self._build_likelihood_field(known_grid)
         self.trajectory = [self.est_pose]
-        # 推定誤差ログ
+        # estimation-error log
         self.last_correction = (0.0, 0.0, 0.0)
 
     # ------------------------------------------------------------------
-    # 尤度場 (壁までの距離変換) を BFS で前計算
+    # Precompute the likelihood field (distance transform to walls) with BFS
     # ------------------------------------------------------------------
     def _build_likelihood_field(self, grid):
         n = self.size
@@ -52,7 +56,7 @@ class SlamCore:
                 if grid[y][x] == WALL:
                     dist[y][x] = 0
                     q.append((x, y))
-        # 4近傍 BFS による距離変換 (整数のみ)
+        # Distance transform via 4-neighbor BFS (integers only)
         while q:
             x, y = q.popleft()
             d = dist[y][x]
@@ -66,10 +70,10 @@ class SlamCore:
     def _wall_distance(self, ix, iy):
         if 0 <= ix < self.size and 0 <= iy < self.size:
             return self.likelihood[iy][ix]
-        return 0  # 範囲外は壁扱い
+        return 0  # out of bounds is treated as a wall
 
     def _raycast_known(self, px, py, ang, max_range=12.0, step=0.1):
-        """既知壁マップ上で1本のレイを飛ばし、壁までの期待距離を返す。"""
+        """Cast one ray on the known wall map and return the expected range to a wall."""
         dx, dy = math.cos(ang), math.sin(ang)
         d = 0.0
         n = self.size
@@ -84,19 +88,23 @@ class SlamCore:
         return max_range
 
     # ------------------------------------------------------------------
-    # スキャン一致スコア (大きいほど良い = 残差が小さい)
+    # Scan match score (higher is better = smaller residual)
     # ------------------------------------------------------------------
     def _scan_score(self, pose, scan, beam_stride=4):
         """
-        方位ごとに『候補姿勢から既知壁マップへ raycast した期待距離』と
-        『LiDAR実測距離』の残差を取り、ロバストにスコア化する。
-        - 期待距離より大幅に短い実測 = 家具/動的障害物に当たったビーム → 除外。
-        - 残差はキャップ付き二乗で評価し、外れ値に頑健にする。
-        方位対応で評価するため『隅への吸着』バイアスが生じない。
+        Per bearing, take the residual between the 'expected range obtained by
+        raycasting from the candidate pose against the known wall map' and the
+        'LiDAR measured range', and score it robustly.
+        - A measurement much shorter than expected = a beam that hit
+          furniture / a dynamic obstacle -> excluded.
+        - The residual is evaluated with a capped square to stay robust to
+          outliers.
+        Because it is evaluated per bearing, the 'corner-snapping' bias does
+        not arise.
         """
         px, py, pth = pose
         score = 0.0
-        cap = 1.0  # 残差キャップ(セル)
+        cap = 1.0  # residual cap (cells)
         for i in range(0, len(scan), beam_stride):
             beam = scan[i]
             if not beam['hit']:
@@ -104,7 +112,8 @@ class SlamCore:
             ang = pth + beam['angle']
             expected = self._raycast_known(px, py, ang)
             measured = beam['dist']
-            # 既知壁より手前で当たった(=家具/動的障害物) ビームは整合に使わない
+            # A beam that hit nearer than the known wall (= furniture / dynamic
+            # obstacle) is not used for alignment
             if measured < expected - 1.0:
                 continue
             r = measured - expected
@@ -112,34 +121,36 @@ class SlamCore:
                 r = cap
             elif r < -cap:
                 r = -cap
-            score += (cap * cap - r * r)   # 残差0で最大、外れで0
+            score += (cap * cap - r * r)   # max at residual 0, zero for outliers
         return score
 
     # ------------------------------------------------------------------
-    # 1ステップ更新: 予測 + スキャンマッチング補正
+    # One-step update: prediction + scan matching correction
     # ------------------------------------------------------------------
     def update(self, odom_u, scan):
         """
-        odom_u : (forward, dtheta) — ロボットが指令した(=計測したつもりの)運動。
-        scan   : 現在の真の姿勢から得た LiDAR 点群。
-        戻り値 : 補正後の推定姿勢 (x, y, theta)。
+        odom_u : (forward, dtheta) — the motion the robot commanded (= thinks it
+                 measured).
+        scan   : the LiDAR point cloud obtained from the current true pose.
+        Returns: the corrected estimated pose (x, y, theta).
         """
         forward, dtheta = odom_u
         x, y, th = self.est_pose
 
-        # --- 1) 予測ステップ ---
+        # --- 1) prediction step ---
         th_pred = th + dtheta
         x_pred = x + math.cos(th_pred) * forward
         y_pred = y + math.sin(th_pred) * forward
         predicted = (x_pred, y_pred, th_pred)
 
-        # --- 2) 相関型スキャンマッチングで補正 (粗→密の2段階探索) ---
-        # 粗探索で大域的な補正方向を掴み、密探索で精度を上げる。
-        # 候補数を抑えることで CPU 負荷を最小化する。
+        # --- 2) correct with correlative scan matching (coarse-to-fine search) ---
+        # The coarse search grabs the global correction direction; the fine
+        # search improves accuracy. Keeping the candidate count low minimizes
+        # CPU load.
         best_pose = (x_pred, y_pred, th_pred)
         best_score = self._scan_score(best_pose, scan)
 
-        # 段1: 粗探索 (±0.6セル, ±0.1rad)
+        # Stage 1: coarse search (+/-0.6 cell, +/-0.1 rad)
         for dxx in (-0.6, 0.0, 0.6):
             for dyy in (-0.6, 0.0, 0.6):
                 for dth in (-0.10, 0.0, 0.10):
@@ -148,7 +159,7 @@ class SlamCore:
                     if s > best_score:
                         best_score, best_pose = s, cand
 
-        # 段2: 密探索 (粗探索の最良点まわり ±0.2セル, ±0.05rad)
+        # Stage 2: fine search (+/-0.2 cell, +/-0.05 rad around the coarse best)
         cx, cy, cth = best_pose
         for dxx in (-0.2, 0.0, 0.2):
             for dyy in (-0.2, 0.0, 0.2):
@@ -168,6 +179,6 @@ class SlamCore:
         return best_pose
 
     def pose_error(self, true_pose):
-        """推定姿勢と真の姿勢のユークリッド距離(セル)。評価用。"""
+        """Euclidean distance (cells) between estimated and true pose. For evaluation."""
         return math.hypot(self.est_pose[0] - true_pose[0],
                           self.est_pose[1] - true_pose[1])

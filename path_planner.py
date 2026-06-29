@@ -1,19 +1,20 @@
 """
 path_planner.py
 ===============
-セマンティクス(意図)を反映したコストマップを動的生成し、A*で経路探索する。
+Dynamically generate a costmap that reflects semantics (intent) and search a
+path with A*.
 
-コスト設計 (意図の数値化):
-  * 壁 / 既知障害物          : 進入不可 (INF)
-  * ペットの皿 + 周囲50cm    : 進入不可 (INF)   ← 50cm = 2セル膨張
-  * 椅子・テーブルのセル自体 : 進入不可 (INF)
-  * 椅子・テーブルの周囲     : 高コスト(人間の動線を尊重し避けたい)
-  * 自由空間                 : 基本コスト 1
+Cost design (quantifying intent):
+  * walls / known obstacles      : non-traversable (INF)
+  * pet bowl + 50 cm margin      : non-traversable (INF)   <- 50 cm = 2-cell inflation
+  * chair / table cells          : non-traversable (INF)
+  * around chairs / tables       : high cost (respect human movement, prefer to avoid)
+  * free space                   : base cost 1
 
-動的リプランニング:
-  椅子が突然動いて経路を塞いだ場合、コストマップを部分更新して A* を
-  再実行する。20x20 規模では 1回の A* が 1ms 未満で完了するため、
-  要求仕様「10ms 以内」を満たす。
+Dynamic re-planning:
+  When a chair suddenly moves and blocks the path, partially update the costmap
+  and re-run A*. At 20x20 scale a single A* completes in under 1 ms, so the
+  required "within 10 ms" spec is met.
 """
 
 import heapq
@@ -24,10 +25,10 @@ from semantic_grid import LABEL_HUMAN, LABEL_PET
 
 INF = float('inf')
 
-# 意味論に基づく追加コスト
-PET_INFLATE_CELLS = 2   # ペット皿の進入禁止膨張半径 = 2セル ≈ 50cm
-HUMAN_NEAR_COST = 6.0   # 椅子周辺(人間の動線)の通過コスト
-HUMAN_INFLATE = 1       # 椅子周辺の影響半径
+# extra cost based on semantics
+PET_INFLATE_CELLS = 2   # pet-bowl keep-out inflation radius = 2 cells ~= 50 cm
+HUMAN_NEAR_COST = 6.0   # traversal cost around chairs (human movement lanes)
+HUMAN_INFLATE = 1       # influence radius around chairs
 
 
 class CostmapPlanner:
@@ -37,13 +38,15 @@ class CostmapPlanner:
         self.last_plan_ms = 0.0
 
     # ------------------------------------------------------------------
-    # セマンティクス反映コストマップの(再)生成
+    # (Re)generate the semantics-aware costmap
     # ------------------------------------------------------------------
     def build_costmap(self, occupancy, semantic):
         """
-        occupancy : 2D リスト。各セルの種別 (WALL/FREE/HUMAN_FURNITURE/PET_ZONE)。
-                    SLAM/知覚が現時点で『そこにある』と信じる障害物配置。
-        semantic  : SemanticGrid。可動障害物のクラス確信度を補助的に使用。
+        occupancy : 2D list. Type of each cell (WALL/FREE/HUMAN_FURNITURE/PET_ZONE).
+                    The obstacle layout SLAM/perception currently believes is
+                    'there'.
+        semantic  : SemanticGrid. Used as auxiliary class confidence for movable
+                    obstacles.
         """
         n = self.size
         cm = [[1.0 for _ in range(n)] for _ in range(n)]
@@ -59,10 +62,10 @@ class CostmapPlanner:
                     cm[y][x] = INF
                     pet_cells.append((x, y))
                 elif k == HUMAN_FURNITURE:
-                    cm[y][x] = INF        # 家具セル自体は通れない
+                    cm[y][x] = INF        # the furniture cell itself is impassable
                     human_cells.append((x, y))
 
-        # --- ペット皿: 周囲50cm(2セル)を進入禁止に膨張 ---
+        # --- pet bowl: inflate a 50 cm (2-cell) keep-out region ---
         for (px, py) in pet_cells:
             for dy in range(-PET_INFLATE_CELLS, PET_INFLATE_CELLS + 1):
                 for dx in range(-PET_INFLATE_CELLS, PET_INFLATE_CELLS + 1):
@@ -71,7 +74,7 @@ class CostmapPlanner:
                         if math.hypot(dx, dy) <= PET_INFLATE_CELLS + 0.001:
                             cm[ny][nx] = INF
 
-        # --- 椅子・テーブル: 周囲を高コスト化(人間の動線を尊重) ---
+        # --- chairs / tables: raise surrounding cost (respect human lanes) ---
         for (hx, hy) in human_cells:
             for dy in range(-HUMAN_INFLATE, HUMAN_INFLATE + 1):
                 for dx in range(-HUMAN_INFLATE, HUMAN_INFLATE + 1):
@@ -83,12 +86,12 @@ class CostmapPlanner:
         return cm
 
     # ------------------------------------------------------------------
-    # A* 経路探索
+    # A* path search
     # ------------------------------------------------------------------
     def plan(self, start, goal):
         """
-        start, goal : (ix, iy) グリッド座標。
-        戻り値      : 経路 [(x,y), ...] (start→goal)。到達不可なら []。
+        start, goal : (ix, iy) grid coordinates.
+        Returns     : path [(x,y), ...] (start->goal). [] if unreachable.
         """
         import time
         t0 = time.perf_counter()
@@ -102,10 +105,10 @@ class CostmapPlanner:
         sx, sy = start
         gx, gy = goal
         if cm[gy][gx] == INF:
-            return []  # 目的地が侵入不可
+            return []  # goal is non-traversable
 
         def h(x, y):
-            # 8近傍移動のためオクタイル距離をヒューリスティックに
+            # octile distance heuristic for 8-connected movement
             dx, dy = abs(x - gx), abs(y - gy)
             return (dx + dy) + (math.sqrt(2) - 2) * min(dx, dy)
 
@@ -131,7 +134,7 @@ class CostmapPlanner:
                 cell_cost = cm[ny][nx]
                 if cell_cost == INF:
                     continue
-                # 斜め移動は角抜け禁止 (両隣が壁ならスキップ)
+                # no diagonal corner-cutting (skip if either side is a wall)
                 if dx != 0 and dy != 0:
                     if cm[y][nx] == INF or cm[ny][x] == INF:
                         continue
@@ -141,7 +144,7 @@ class CostmapPlanner:
                     g_score[(nx, ny)] = ng
                     came_from[(nx, ny)] = (x, y)
                     heapq.heappush(open_heap, (ng + h(nx, ny), ng, (nx, ny)))
-        return []  # 到達不可
+        return []  # unreachable
 
     def _reconstruct(self, came_from, cur):
         path = [cur]
@@ -152,13 +155,13 @@ class CostmapPlanner:
         return path
 
     # ------------------------------------------------------------------
-    # 動的リプランニング
+    # Dynamic re-planning
     # ------------------------------------------------------------------
     def replan_if_blocked(self, path, occupancy, semantic, start, goal):
         """
-        現在の経路 path 上に新たな障害物が出現していないか確認し、
-        塞がれていればコストマップを再生成して A* を再実行する。
-        戻り値: (新しい経路, 再計画したか bool, 所要ms)
+        Check whether a new obstacle has appeared on the current path; if it is
+        blocked, regenerate the costmap and re-run A*.
+        Returns: (new path, whether it replanned (bool), elapsed ms)
         """
         import time
         blocked = False
